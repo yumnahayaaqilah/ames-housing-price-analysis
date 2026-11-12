@@ -2,7 +2,7 @@
 
 Regression, classification, and segmentation of 2,930 residential property sales in Ames, Iowa, built in R and structured around the CRISP-DM process (Business Understanding through Evaluation).
 
-**Full report:** [PDF](reports/ames_housing_analysis.pdf) | [HTML](reports/ames_housing_analysis.html) (download to view; code blocks are foldable). The report is written in Indonesian.
+**Full report:** [PDF](reports/ames_housing_analysis.pdf) | [HTML](https://yumnahayaaqilah.github.io/ames-housing-price-analysis/reports/ames_housing_analysis.html) (code blocks are foldable). The report is written in Indonesian.
 
 ## Results at a Glance
 
