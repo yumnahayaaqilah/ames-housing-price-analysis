@@ -1,0 +1,813 @@
+---
+title: "Analisis Harga Rumah dengan Pendekatan CRISP-DM"
+subtitle: "Studi Kasus Dataset Ames Housing"
+author: "Yumna Haya Aqilah"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    theme: readable
+    code_folding: hide
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: pdflatex
+    fig_caption: true
+fontsize: 12pt
+geometry: margin=2.5cm
+header-includes:
+  - \usepackage{mathptmx}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = knitr::is_html_output(),  # kode dapat dibuka di HTML, disembunyikan di PDF
+  eval = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.5,
+  dpi = 150,
+  out.width = "85%"
+)
+```
+
+```{r font-html, echo=FALSE, results='asis'}
+# Font Times New Roman untuk HTML. Untuk PDF, font Times diatur lewat paket LaTeX mathptmx di YAML.
+if (knitr::is_html_output()) {
+  cat('<style>
+  body, p, li, td, th, h1, h2, h3, h4, h5, h6, div {
+    font-family: "Times New Roman", Times, serif;
+  }
+  </style>')
+}
+```
+
+```{r libraries}
+library(AmesHousing)   # sumber dataset Ames Housing
+library(dplyr)         # manipulasi data
+library(tidyr)         # penataan data
+library(ggplot2)       # visualisasi
+library(corrplot)      # visualisasi korelasi
+library(rpart)         # pohon keputusan (Decision Tree)
+library(rpart.plot)    # visualisasi pohon keputusan
+library(cluster)       # evaluasi silhouette
+library(knitr)         # tabel dan knit
+
+theme_set(theme_minimal(base_family = "serif", base_size = 11))
+set.seed(123)
+
+# Helper untuk menulis nama variabel sebagai kode di teks inline
+kode <- function(x) paste0("`", x, "`", collapse = ", ")
+```
+
+# Business Understanding
+
+## Permasalahan Bisnis
+
+Penentuan harga jual rumah merupakan salah satu persoalan yang paling fundamental sekaligus paling sulit di industri properti. Penjual, pembeli, agen, hingga lembaga pembiayaan kerap menghadapi ketidakpastian dalam menilai apakah harga sebuah properti sudah wajar. Penetapan harga yang terlalu tinggi memperlambat penjualan, sementara harga yang terlalu rendah menyebabkan potensi kerugian. Permasalahan inti yang diangkat dalam laporan ini adalah bagaimana memodelkan dan memahami faktor-faktor yang berasosiasi dengan harga rumah secara objektif berbasis data, sehingga keputusan penetapan harga tidak semata-mata bergantung pada intuisi.
+
+## Tujuan Analisis
+
+Analisis ini memiliki tiga tujuan analitis yang saling melengkapi. Pertama, membangun model regresi untuk memprediksi harga rumah (`Sale_Price`) sebagai variabel kontinu sekaligus mengidentifikasi variabel yang paling berpengaruh. Kedua, membangun model klasifikasi untuk menggolongkan rumah ke dalam kategori harga tinggi (*High*) dan rendah (*Low*) sebagai alat bantu pengambilan keputusan yang lebih sederhana. Ketiga, melakukan segmentasi (*clustering*) properti untuk menemukan kelompok-kelompok rumah dengan karakteristik serupa yang berguna untuk strategi pemasaran dan penargetan pasar.
+
+## Alasan Penggunaan Dataset Ames Housing
+
+Dataset Ames Housing dipilih karena merupakan salah satu dataset rujukan yang paling kaya dan paling banyak digunakan untuk masalah prediksi harga rumah. Dataset ini mencatat transaksi properti residensial di Ames, Iowa, Amerika Serikat, dengan puluhan atribut yang mencakup dimensi fisik, kualitas, lokasi, hingga fasilitas. Versi yang digunakan diperoleh melalui fungsi `make_ames()` dari paket `AmesHousing`, yaitu versi yang telah diproses dan diberi nama variabel yang mudah dibaca. Laporan ini mengikuti lima fase pertama CRISP-DM (*Business Understanding* sampai *Evaluation*); fase *Deployment* berada di luar cakupan.
+
+# Data Understanding (EDA)
+
+## Memuat Dataset dan Dimensi Data
+
+```{r load-data}
+ames <- make_ames()
+attr(ames, "spec") <- NULL   # metadata impor readr, tidak relevan untuk analisis
+dim_ames <- dim(ames)
+cat("Jumlah observasi (baris):", dim_ames[1], "\n")
+cat("Jumlah variabel (kolom):", dim_ames[2], "\n")
+```
+
+Dataset Ames Housing hasil `make_ames()` memuat **`r dim_ames[1]` observasi** dan **`r dim_ames[2]` variabel**. Jumlah ini berbeda dari data mentah (`ames_raw`) yang berisi `r ncol(ames_raw)` kolom, karena `make_ames()` menghapus kolom `Order`, `PID`, dan `Garage_Yr_Blt` serta menambahkan koordinat `Longitude` dan `Latitude`. Banyaknya atribut memungkinkan eksplorasi faktor penentu harga dari ukuran fisik bangunan hingga kualitas material dan tahun pembangunan.
+
+## Struktur Data
+
+```{r structure}
+str(ames, list.len = 15)
+```
+
+Hasil `str()` di atas ditampilkan terbatas pada 15 variabel pertama. Dataset merupakan objek `tibble` yang memadukan variabel numerik (misalnya `Lot_Frontage` dan `Lot_Area`) dengan banyak variabel bertipe `factor` (misalnya `MS_SubClass` dan `Neighborhood`). Variabel kualitas seperti `Overall_Qual`, yang tidak tampil pada potongan di atas, juga disimpan sebagai *factor* dengan urutan level dari `Very_Poor` hingga `Very_Excellent`, bukan sebagai angka. Implikasinya, variabel ini tidak ikut terbaca pada perhitungan korelasi numerik kecuali dikonversi terlebih dahulu menjadi representasi ordinal.
+
+## Ringkasan Statistik
+
+```{r summary-stats}
+key_vars <- c("Sale_Price", "Gr_Liv_Area", "Total_Bsmt_SF", "Garage_Area",
+              "Lot_Area", "Year_Built", "Full_Bath", "TotRms_AbvGrd")
+summary(ames[key_vars])
+```
+
+Ringkasan statistik difokuskan pada variabel kunci agar tetap terbaca. `Sale_Price` memiliki rentang yang sangat lebar dengan rata-rata lebih tinggi daripada median, indikasi awal kemiringan ke kanan (*right-skewed*) akibat sejumlah rumah berharga sangat mahal. Pola serupa tampak pada `Lot_Area`, di mana selisih besar antara kuartil ketiga dan nilai maksimum menandakan *outlier* berupa lahan yang sangat luas.
+
+## Analisis Missing Value
+
+```{r missing-value}
+total_na <- sum(is.na(ames))
+na_per_col <- colSums(is.na(ames))
+cat("Total missing value pada seluruh dataset:", total_na, "\n")
+cat("Jumlah variabel yang mengandung missing value:", sum(na_per_col > 0), "\n")
+```
+
+```{r missing-encoding}
+# make_ames() tidak menyisakan NA karena mengodekan ulang nilai yang hilang.
+# Perbandingan dengan data mentah menunjukkan bagaimana hal itu dilakukan.
+na_raw_lf <- sum(is.na(ames_raw$`Lot Frontage`))
+zero_lf   <- sum(ames$Lot_Frontage == 0)
+na_raw_mv <- sum(is.na(ames_raw$`Mas Vnr Area`))
+zero_mv_from_na <- sum(ames$Mas_Vnr_Area[is.na(ames_raw$`Mas Vnr Area`)] == 0)
+
+kable(data.frame(
+  Variabel = c("Lot_Frontage", "Mas_Vnr_Area"),
+  NA_di_ames_raw = c(na_raw_lf, na_raw_mv),
+  Menjadi_nol_di_make_ames = c(zero_lf, zero_mv_from_na)
+), caption = "Pengodean Ulang Missing Value oleh make_ames()")
+```
+
+Dataset hasil `make_ames()` **tidak memiliki missing value** (total `r total_na`). Namun ketiadaan NA ini bukan berarti datanya lengkap: `make_ames()` mengodekan ulang nilai yang hilang, misalnya menjadi kategori seperti `No_Garage` atau menjadi angka 0. Tabel di atas menunjukkan `r na_raw_lf` nilai `Lot Frontage` yang hilang di data mentah tercatat sebagai 0, dan `r na_raw_mv` nilai `Mas Vnr Area` yang hilang juga menjadi 0. `Lot_Frontage` tidak dipakai dalam model, tetapi `Mas_Vnr_Area` dipakai, sehingga `r zero_mv_from_na` rumah tersebut diperlakukan sebagai rumah tanpa *masonry veneer*. Karena jumlahnya kecil (kurang dari 1% data), pengodean ini dibiarkan dan dicatat sebagai keterbatasan.
+
+## Distribusi Harga Rumah
+
+```{r dist-price}
+ggplot(ames, aes(x = Sale_Price)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title = "Distribusi Harga Rumah (Sale_Price)",
+       x = "Harga Jual (USD)", y = "Frekuensi")
+```
+
+Histogram memperkuat dugaan bahwa distribusi `Sale_Price` menceng ke kanan. Mayoritas rumah terkonsentrasi pada rentang harga menengah, sementara ekor panjang ke arah harga tinggi ditempati sejumlah kecil properti mahal. Distribusi seperti ini berpotensi melanggar asumsi kenormalan residual pada regresi linier dan dapat menurunkan akurasi prediksi pada segmen harga ekstrem.
+
+## Boxplot Harga Rumah
+
+```{r boxplot-price}
+ggplot(ames, aes(y = Sale_Price)) +
+  geom_boxplot(fill = "darkorange", alpha = 0.7) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Boxplot Harga Rumah (Sale_Price)", y = "Harga Jual (USD)") +
+  theme(axis.text.x = element_blank())
+```
+
+Boxplot menunjukkan banyak titik *outlier* di atas batas pagar atas (*upper whisker*), yaitu rumah dengan harga jauh di atas mayoritas pasar. *Outlier* ini merepresentasikan segmen properti premium yang nyata, bukan sekadar gangguan statistik. Akibatnya, metrik berbasis kuadrat galat seperti RMSE dapat didominasi oleh segelintir properti mahal.
+
+## Korelasi Variabel Numerik
+
+```{r correlation, fig.width=7, fig.height=7, out.width="80%"}
+# Konversi variabel kualitas ordinal menjadi numerik agar ikut dianalisis
+ames_cor <- ames %>%
+  mutate(Overall_Qual_num = as.integer(Overall_Qual),
+         Overall_Cond_num = as.integer(Overall_Cond)) %>%
+  select(where(is.numeric))
+
+cor_mat <- cor(ames_cor, use = "complete.obs")
+
+# Variabel yang paling berkorelasi dengan Sale_Price untuk heatmap
+cor_sp_all <- sort(cor_mat[, "Sale_Price"], decreasing = TRUE)
+top_vars <- names(cor_sp_all)[1:11]
+corrplot(cor_mat[top_vars, top_vars],
+         method = "color", type = "upper",
+         tl.col = "black", tl.cex = 0.75, tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.65,
+         col = colorRampPalette(c("#B2182B", "white", "#2166AC"))(200))
+```
+
+Heatmap korelasi menampilkan hubungan antar variabel numerik yang paling kuat berasosiasi dengan harga. `Overall_Qual` (kualitas bangunan keseluruhan) memiliki korelasi positif paling kuat terhadap `Sale_Price` (r = `r sprintf("%.2f", cor_mat["Overall_Qual_num", "Sale_Price"])`), diikuti variabel ukuran seperti `Gr_Liv_Area` dan kapasitas garasi. Heatmap juga memperlihatkan bahwa beberapa prediktor saling berkorelasi tinggi, misalnya `Garage_Cars` dengan `Garage_Area` (r = `r sprintf("%.2f", cor_mat["Garage_Cars", "Garage_Area"])`) dan `Total_Bsmt_SF` dengan `First_Flr_SF` (r = `r sprintf("%.2f", cor_mat["Total_Bsmt_SF", "First_Flr_SF"])`).
+
+## Sepuluh Variabel Paling Berkorelasi dengan Harga
+
+```{r top10-cor}
+top10 <- cor_sp_all[2:11]   # indeks 1 adalah Sale_Price terhadap dirinya sendiri
+top10_df <- data.frame(Variabel = names(top10),
+                       Korelasi = round(as.numeric(top10), 3))
+kable(top10_df, caption = "Sepuluh Variabel dengan Korelasi Tertinggi terhadap Sale_Price")
+
+# Daftar ini dipakai kembali secara identik pada sanity check dan pemodelan.
+top_predictors <- names(top10)
+```
+
+Tabel di atas memeringkat sepuluh variabel dengan korelasi tertinggi terhadap `Sale_Price`. `Overall_Qual` berada di puncak, diikuti variabel ukuran fisik (`Gr_Liv_Area`, `Garage_Cars`, `Garage_Area`, `Total_Bsmt_SF`). Polanya koheren: harga rumah di Ames terutama berasosiasi dengan dua dimensi, yaitu *kualitas bangunan* dan *luas ruang*. Variabel temporal seperti `Year_Built` juga muncul, menandakan rumah yang lebih baru cenderung berharga lebih tinggi. Daftar ini menjadi dasar pemilihan prediktor pada tahap pemodelan.
+
+## Hubungan Luas Rumah dan Harga
+
+```{r scatter-area}
+p_area <- ggplot(ames, aes(x = Gr_Liv_Area, y = Sale_Price)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Hubungan Luas Ruang Hidup dan Harga Rumah",
+       x = "Luas Ruang Hidup di Atas Tanah (sq ft)", y = "Harga Jual (USD)")
+p_area
+```
+
+Scatterplot memperlihatkan hubungan linier positif yang cukup tegas antara luas ruang hidup (`Gr_Liv_Area`) dan harga jual. Sebaran titik melebar pada luas yang besar, menandakan luas saja tidak cukup menjelaskan harga properti besar; kualitas dan lokasi kemungkinan turut berperan. Terdapat pula beberapa titik dengan luas sangat besar namun harga relatif rendah. Titik-titik ini merupakan kandidat *influential outlier* yang dapat menarik garis regresi dan dibahas kembali pada tahap pemodelan.
+
+## Harga Rumah Berdasarkan Kualitas Bangunan
+
+```{r boxplot-quality}
+p_quality <- ggplot(ames, aes(x = Overall_Qual, y = Sale_Price)) +
+  geom_boxplot(fill = "mediumseagreen", alpha = 0.7) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Harga Rumah Berdasarkan Kualitas Bangunan",
+       x = "Kualitas Bangunan Keseluruhan", y = "Harga Jual (USD)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p_quality
+```
+
+Visualisasi ini menunjukkan gradasi harga yang monoton seiring meningkatnya kualitas bangunan: median harga pada kategori `Very_Excellent` berkali lipat lebih tinggi dibanding kategori `Average` ke bawah. Pola berjenjang ini mengonfirmasi bahwa hubungan `Overall_Qual` dengan harga terstruktur dan dapat ditafsirkan. Rentang interkuartil yang membesar pada kategori kualitas tinggi juga menunjukkan bahwa variabilitas harga rumah premium jauh lebih besar.
+
+# Data Preparation
+
+## Penanganan Missing Value
+
+```{r prep-missing}
+ames_clean <- ames %>% drop_na()
+cat("Jumlah baris sebelum penanganan NA:", nrow(ames), "\n")
+cat("Jumlah baris sesudah penanganan NA:", nrow(ames_clean), "\n")
+```
+
+Karena tidak ada NA, `drop_na()` tidak menghapus observasi apa pun. Langkah ini dipertahankan sebagai pengaman jika sumber data berubah.
+
+## Deteksi dan Penanganan Duplikasi
+
+```{r prep-duplicate}
+n_dup <- sum(duplicated(ames_clean))
+cat("Jumlah baris duplikat terdeteksi:", n_dup, "\n")
+
+# Menghapus baris duplikat bila ada (mempertahankan satu salinan)
+ames_clean <- dplyr::distinct(ames_clean)
+cat("Jumlah baris setelah penghapusan duplikat:", nrow(ames_clean), "\n")
+```
+
+Tidak ditemukan baris duplikat, sehingga `distinct()` tidak menghapus observasi apa pun.
+
+## Validasi Nilai Tidak Wajar (Sanity Check)
+
+```{r prep-sanity}
+# Pemeriksaan rentang untuk seluruh variabel model (top_predictors) dan target.
+# Overall_Qual_num dikecualikan karena merupakan encoding dari factor yang sudah bersih.
+sanity_vars <- c("Sale_Price", setdiff(top_predictors, "Overall_Qual_num"))
+
+# Variabel yang boleh bernilai 0 (0 = fitur memang tidak ada)
+boleh_nol <- c("Garage_Cars", "Garage_Area", "Total_Bsmt_SF", "Full_Bath",
+               "Mas_Vnr_Area", "Half_Bath", "Fireplaces")
+must_positive <- setdiff(sanity_vars, boleh_nol)   # harus > 0
+non_negative  <- intersect(sanity_vars, boleh_nol) # boleh = 0, tidak boleh < 0
+
+cek_positif <- sapply(must_positive, function(v) sum(ames_clean[[v]] <= 0, na.rm = TRUE))
+cek_negatif <- sapply(non_negative, function(v) sum(ames_clean[[v]] < 0, na.rm = TRUE))
+
+cat("Variabel yang harus positif:\n"); print(cek_positif)
+cat("\nVariabel yang boleh nol:\n"); print(cek_negatif)
+
+# Penanganan: imputasi nilai tidak wajar dengan median (robust terhadap outlier)
+total_imputasi <- 0
+for (v in must_positive) {
+  bad <- which(ames_clean[[v]] <= 0)
+  if (length(bad) > 0) {
+    ames_clean[[v]][bad] <- median(ames_clean[[v]][ames_clean[[v]] > 0], na.rm = TRUE)
+    total_imputasi <- total_imputasi + length(bad)
+  }
+}
+for (v in non_negative) {
+  bad <- which(ames_clean[[v]] < 0)
+  if (length(bad) > 0) {
+    ames_clean[[v]][bad] <- median(ames_clean[[v]][ames_clean[[v]] >= 0], na.rm = TRUE)
+    total_imputasi <- total_imputasi + length(bad)
+  }
+}
+cat("\nTotal nilai tidak wajar yang diimputasi dengan median:", total_imputasi, "\n")
+```
+
+```{r prep-domain}
+# Pemeriksaan konsistensi antarvariabel. Hanya dilaporkan, data tidak diubah.
+n_remod_before_built <- sum(ames_clean$Year_Remod_Add < ames_clean$Year_Built)
+n_built_after_sold   <- sum(ames_clean$Year_Built > ames_clean$Year_Sold)
+n_garage_mismatch    <- sum((ames_clean$Garage_Cars == 0) != (ames_clean$Garage_Area == 0))
+
+kable(data.frame(
+  Pemeriksaan = c("Tahun renovasi lebih awal dari tahun dibangun",
+                  "Tahun dibangun lebih akhir dari tahun terjual",
+                  "Garage_Cars = 0 tidak sejalan dengan Garage_Area = 0"),
+  Jumlah_Baris = c(n_remod_before_built, n_built_after_sold, n_garage_mismatch)
+), caption = "Pemeriksaan Konsistensi Antarvariabel")
+
+# Dataset bersih final diteruskan ke tahap pemodelan
+ames <- ames_clean
+```
+
+Validasi diterapkan pada sepuluh variabel berkorelasi tertinggi beserta target. Aturan kewajaran dibedakan: `Sale_Price`, `Gr_Liv_Area`, `First_Flr_SF`, dan variabel tahun harus bernilai positif, sedangkan `Garage_Cars`, `Garage_Area`, `Total_Bsmt_SF`, `Full_Bath`, dan `Mas_Vnr_Area` boleh bernilai nol karena nol bermakna substantif (rumah tanpa garasi, basement, kamar mandi penuh, atau veneer batu). Tidak ditemukan nilai di luar rentang, sehingga tidak ada imputasi. Median disiapkan sebagai strategi imputasi karena distribusi harga dan luas sarat *outlier*.
+
+Pemeriksaan konsistensi antarvariabel menemukan `r n_remod_before_built` rumah dengan tahun renovasi lebih awal dari tahun dibangun dan `r n_built_after_sold` rumah yang tercatat dibangun setelah tahun terjual (kemungkinan penjualan rumah baru sebelum selesai dibangun). Karena hanya menyangkut dua dari `r nrow(ames)` baris, data dibiarkan apa adanya. Kapasitas garasi (`Garage_Cars`) dan luas garasi (`Garage_Area`) sepenuhnya konsisten.
+
+## Pemilihan Variabel dan Encoding
+
+```{r prep-select}
+# Bertolak dari 10 variabel paling berkorelasi (top_predictors). Garage_Cars dan
+# Garage_Area mengukur hal yang nyaris sama, sehingga Garage_Area dibuang untuk
+# mengurangi redundansi. Garage_Cars dipertahankan karena korelasinya sedikit
+# lebih tinggi dan lebih mudah ditafsirkan.
+ames_model <- ames %>%
+  mutate(Overall_Qual_num = as.integer(Overall_Qual),
+         Overall_Cond_num = as.integer(Overall_Cond))
+
+model_predictors <- setdiff(top_predictors, "Garage_Area")
+model_df <- ames_model %>% select(Sale_Price, all_of(model_predictors))
+
+cat("Variabel prediktor:\n")
+print(model_predictors)
+str(model_df, list.len = 10)
+```
+
+Prediktor dipilih dari sepuluh variabel numerik dengan korelasi tertinggi terhadap `Sale_Price`, lalu `Garage_Area` dibuang. Alasannya, `Garage_Area` dan `Garage_Cars` mengukur hal yang sama (kapasitas garasi) dengan korelasi `r sprintf("%.2f", cor_mat["Garage_Cars", "Garage_Area"])`, sehingga memasukkan keduanya terutama menambah redundansi. Dampak keputusan ini terhadap akurasi prediksi diukur pada bagian 4.1.3. Variabel kualitas ordinal (`Overall_Qual`) di-*encode* menjadi integer 1 (`Very_Poor`) sampai 10 (`Very_Excellent`) sesuai urutan levelnya.
+
+## Pemilihan Variabel dan Standardisasi untuk Clustering
+
+```{r prep-scale}
+# Variabel ukuran yang saling berkorelasi (Total_Bsmt_SF, Garage_Area) serta
+# Lot_Area yang sarat outlier tidak diikutsertakan.
+clust_vars <- ames %>%
+  mutate(Overall_Qual_num = as.integer(Overall_Qual)) %>%
+  select(Sale_Price, Gr_Liv_Area, Overall_Qual_num)
+
+clust_scaled <- scale(clust_vars)
+cat("Rata-rata setiap kolom setelah standardisasi:\n")
+print(round(colMeans(clust_scaled), 4))
+cat("\nSimpangan baku setiap kolom setelah standardisasi:\n")
+print(round(apply(clust_scaled, 2, sd), 4))
+```
+
+Untuk klastering dipilih tiga variabel yang mewakili tiga dimensi berbeda: harga (`Sale_Price`), ukuran (`Gr_Liv_Area`), dan kualitas (`Overall_Qual`). Variabel ukuran lain seperti `Total_Bsmt_SF` dan `Garage_Area` tidak dimasukkan karena berkorelasi tinggi dengan ukuran lain sehingga akan menggandakan bobot dimensi ukuran, sedangkan `Lot_Area` dikeluarkan karena *outlier* ekstremnya dapat mendominasi jarak. Perlu dicatat bahwa `Sale_Price` ikut menjadi fitur, sehingga segmen yang terbentuk sebagian besar mencerminkan tingkat harga (dibahas pada bagian 4.3.5). Standardisasi ke skor-z wajib karena K-Means memakai jarak Euclidean yang sensitif terhadap skala; output di atas mengonfirmasi setiap variabel memiliki rata-rata nol dan simpangan baku satu.
+
+## Pembuatan Label Klasifikasi
+
+```{r prep-label}
+median_price <- median(model_df$Sale_Price)
+model_df$Price_Class <- factor(
+  ifelse(model_df$Sale_Price > median_price, "High", "Low"),
+  levels = c("Low", "High")
+)
+cat("Nilai median Sale_Price sebagai ambang batas:", median_price, "\n")
+print(table(model_df$Price_Class))
+```
+
+Label klasifikasi `Price_Class` dibentuk dengan membagi rumah menjadi kategori *High* dan *Low* berdasarkan median `Sale_Price` (USD `r format(median_price, big.mark=",")`). Median dipilih karena distribusi harga yang menceng membuat rata-rata tertarik oleh *outlier*, dan median menghasilkan dua kelas yang nyaris seimbang. Keseimbangan kelas ini membuat akurasi tetap bermakna sebagai metrik evaluasi.
+
+## Split Data Train-Test
+
+```{r prep-split}
+set.seed(123)
+n <- nrow(model_df)
+train_idx <- sample(seq_len(n), size = floor(0.8 * n))
+train <- model_df[train_idx, ]
+test  <- model_df[-train_idx, ]
+cat("Jumlah data latih:", nrow(train), "(80%)\n")
+cat("Jumlah data uji :", nrow(test), "(20%)\n")
+```
+
+Data dibagi secara acak menjadi 80 persen data latih (`r nrow(train)` observasi) dan 20 persen data uji (`r nrow(test)` observasi) dengan *seed* tetap untuk reproduktibilitas. Data uji hanya dipakai untuk evaluasi akhir agar estimasi performa tidak terlalu optimistis.
+
+# Modeling
+
+## Regresi (Regression)
+
+### Pembentukan Model dan Ringkasan
+
+```{r reg-model}
+train_reg <- train %>% select(-Price_Class)
+test_reg  <- test  %>% select(-Price_Class)
+
+lm_model <- lm(Sale_Price ~ ., data = train_reg)
+summary(lm_model)
+```
+
+```{r reg-vif}
+# Variance Inflation Factor dihitung manual: VIF_j = 1 / (1 - R^2_j),
+# dengan R^2_j dari regresi prediktor j terhadap prediktor lainnya.
+X_train <- train_reg %>% select(-Sale_Price)
+vif_vals <- sapply(names(X_train), function(v) {
+  r2_j <- summary(lm(reformulate(setdiff(names(X_train), v), response = v),
+                     data = X_train))$r.squared
+  1 / (1 - r2_j)
+})
+kable(data.frame(Variabel = names(vif_vals), VIF = round(vif_vals, 2)),
+      row.names = FALSE, caption = "Variance Inflation Factor (VIF) Prediktor Regresi")
+
+coef_lm   <- coef(summary(lm_model))
+n_pos     <- sum(coef_lm[-1, "Estimate"] > 0)
+max_p     <- max(coef_lm[-1, "Pr(>|t|)"])
+ci_qual   <- confint(lm_model)["Overall_Qual_num", ]
+```
+
+Model regresi linier berganda dibangun dengan `Sale_Price` sebagai target dan sembilan prediktor. Seluruh koefisien signifikan secara statistik (p-value terbesar `r signif(max_p, 2)`) dan `r n_pos` dari 9 koefisien bertanda positif, sejalan dengan temuan EDA bahwa kualitas dan ukuran berasosiasi kuat dengan harga. Dengan prediktor lain tetap, kenaikan satu tingkat `Overall_Qual` berasosiasi dengan harga sekitar USD `r format(round(coef(lm_model)["Overall_Qual_num"], -2), big.mark=",")` lebih tinggi (interval kepercayaan 95%: USD `r format(round(ci_qual[1], -2), big.mark=",")` sampai `r format(round(ci_qual[2], -2), big.mark=",")`).
+
+Satu-satunya koefisien negatif adalah `Full_Bath`, padahal korelasinya dengan harga positif. Nilai VIF semua prediktor berada di bawah 5 (tertinggi `r round(max(vif_vals), 2)` pada `r kode(names(which.max(vif_vals)))`), sehingga tanda negatif ini tidak dapat dijelaskan sebagai multikolinearitas berat. Tafsiran yang lebih tepat adalah efek parsial: pada luas ruang hidup yang sama, rumah dengan lebih banyak kamar mandi penuh menyisakan ruang lain yang lebih sempit. Koefisien individual seperti ini perlu ditafsirkan sebagai asosiasi bersyarat, bukan efek kausal.
+
+### Prediksi dan Evaluasi Metrik
+
+```{r reg-eval}
+pred_reg <- predict(lm_model, newdata = test_reg)
+aktual   <- test_reg$Sale_Price
+
+rmse <- sqrt(mean((aktual - pred_reg)^2))
+mae  <- mean(abs(aktual - pred_reg))
+r2   <- 1 - sum((aktual - pred_reg)^2) / sum((aktual - mean(aktual))^2)
+
+# Baseline: memprediksi setiap rumah dengan rata-rata harga data latih
+baseline_rmse <- sqrt(mean((aktual - mean(train_reg$Sale_Price))^2))
+baseline_mae  <- mean(abs(aktual - mean(train_reg$Sale_Price)))
+
+hasil_reg <- data.frame(
+  Metrik = c("RMSE (USD)", "MAE (USD)", "R-squared"),
+  Baseline_Rata_rata = c(format(round(baseline_rmse), big.mark = ","),
+                         format(round(baseline_mae), big.mark = ","), "0"),
+  Regresi_Linier = c(format(round(rmse), big.mark = ","),
+                     format(round(mae), big.mark = ","), format(round(r2, 4), nsmall = 4))
+)
+kable(hasil_reg, caption = "Metrik Evaluasi Model Regresi pada Data Uji")
+```
+
+Pada data uji, model menghasilkan **RMSE USD `r format(round(rmse), big.mark=",")`**, **MAE USD `r format(round(mae), big.mark=",")`**, dan **$R^2$ `r round(r2, 3)`**, artinya sekitar `r round(r2 * 100)` persen variasi harga pada data uji dijelaskan oleh model. Sebagai pembanding, baseline yang memprediksi setiap rumah dengan rata-rata harga data latih menghasilkan RMSE USD `r format(round(baseline_rmse), big.mark=",")`, sehingga model menurunkan RMSE sekitar `r round((1 - rmse / baseline_rmse) * 100)` persen. $R^2$ data latih (`r round(summary(lm_model)$r.squared, 4)`) hampir sama dengan $R^2$ data uji, sehingga tidak ada indikasi *overfitting*. MAE setara dengan sekitar `r round(mae / median_price * 100)` persen median harga rumah. RMSE sebesar `r round(rmse / mae, 2)` kali MAE menandakan adanya sebagian kecil prediksi dengan galat besar.
+
+```{r reg-error}
+# Galat per kuartil harga aktual pada data uji
+err_q <- data.frame(aktual = aktual, pred = pred_reg) %>%
+  mutate(Kuartil = ntile(aktual, 4), galat = abs(aktual - pred)) %>%
+  group_by(Kuartil) %>%
+  summarise(n = n(),
+            Harga_Min = min(aktual),
+            Harga_Max = max(aktual),
+            MAE = round(mean(galat)),
+            MAPE_persen = round(mean(galat / aktual) * 100, 1),
+            .groups = "drop")
+kable(err_q, caption = "Galat Prediksi per Kuartil Harga Aktual (Data Uji)")
+
+# Residual terbesar pada data latih
+res_train <- residuals(lm_model)
+i_min <- which.min(res_train)
+res_min_case <- ames_model[train_idx[i_min], c("Gr_Liv_Area", "Sale_Price", "Sale_Condition")]
+n_big_house <- sum(ames$Gr_Liv_Area > 4000)
+```
+
+Tabel galat per kuartil memperjelas di mana model lemah. Dalam satuan dolar, galat terbesar terjadi pada kuartil harga tertinggi (MAE USD `r format(err_q$MAE[4], big.mark=",")` dibanding USD `r format(err_q$MAE[1], big.mark=",")` pada kuartil terendah). Namun secara relatif, galat justru paling besar pada rumah termurah (MAPE `r err_q$MAPE_persen[1]` persen) dan paling kecil pada rumah termahal (MAPE `r err_q$MAPE_persen[4]` persen). Residual paling ekstrem di data latih (USD `r format(round(min(res_train)), big.mark=",")`) berasal dari rumah seluas `r format(res_min_case$Gr_Liv_Area, big.mark=",")` sq ft yang terjual USD `r format(res_min_case$Sale_Price, big.mark=",")` dengan kondisi penjualan `r as.character(res_min_case$Sale_Condition)`. Rumah ini termasuk `r n_big_house` rumah dengan luas di atas 4,000 sq ft yang teridentifikasi sebagai kandidat *influential outlier* pada EDA. Rumah-rumah tersebut tidak dihapus dalam analisis ini.
+
+### Dampak Membuang Garage_Area
+
+```{r reg-garage}
+# Membandingkan model 10 prediktor (dengan Garage_Area) dan model utama (9 prediktor).
+# ames_model dan model_df memiliki urutan baris yang sama, sehingga train_idx berlaku.
+rmse_r2 <- function(prediktor) {
+  m <- lm(reformulate(prediktor, response = "Sale_Price"), data = ames_model[train_idx, ])
+  y <- ames_model$Sale_Price[-train_idx]
+  p <- predict(m, newdata = ames_model[-train_idx, ])
+  c(RMSE = sqrt(mean((y - p)^2)), R2 = 1 - sum((y - p)^2) / sum((y - mean(y))^2))
+}
+garage_cmp <- rbind(rmse_r2(top_predictors), rmse_r2(model_predictors))
+kable(data.frame(
+  Model = c("Dengan Garage_Area (10 prediktor)", "Tanpa Garage_Area (9 prediktor, model utama)"),
+  RMSE_USD = format(round(garage_cmp[, "RMSE"]), big.mark = ","),
+  R_squared = round(garage_cmp[, "R2"], 4)
+), caption = "Perbandingan Model Dengan dan Tanpa Garage_Area (Data Uji)")
+```
+
+Membuang `Garage_Area` sedikit menurunkan akurasi pada data uji: RMSE naik dari USD `r format(round(garage_cmp[1, "RMSE"]), big.mark=",")` menjadi USD `r format(round(garage_cmp[2, "RMSE"]), big.mark=",")` dan $R^2$ turun dari `r round(garage_cmp[1, "R2"], 3)` menjadi `r round(garage_cmp[2, "R2"], 3)`. Selisih ini kecil, sehingga model 9 prediktor tetap dipakai karena lebih ringkas dan koefisien garasinya lebih mudah ditafsirkan. Perbandingan ini dilaporkan sebagai konsekuensi keputusan, bukan sebagai dasar pemilihan, karena memilih fitur berdasarkan data uji akan membuat evaluasi bias.
+
+## Klasifikasi (Classification)
+
+### Pembentukan dan Visualisasi Pohon Keputusan
+
+```{r clf-model}
+# Sale_Price dikeluarkan untuk menghindari kebocoran target (data leakage),
+# karena Price_Class diturunkan langsung dari Sale_Price.
+train_clf <- train %>% select(-Sale_Price)
+test_clf  <- test  %>% select(-Sale_Price)
+
+tree_model <- rpart(Price_Class ~ ., data = train_clf, method = "class")
+rpart.plot(tree_model, type = 2, extra = 104,
+           box.palette = "GnBu", fallen.leaves = TRUE,
+           main = "Pohon Keputusan Klasifikasi Kelas Harga")
+```
+
+```{r clf-importance}
+# Variable importance rpart juga menghitung kontribusi surrogate split,
+# sehingga variabel yang tidak tampil di pohon tetap dapat memiliki nilai.
+imp <- tree_model$variable.importance
+imp_df <- data.frame(Variabel = names(imp),
+                     Importance = round(as.numeric(imp / sum(imp)), 3))
+kable(imp_df, row.names = FALSE,
+      caption = "Variable Importance Pohon Keputusan (proporsi dari total)")
+
+root_var <- as.character(tree_model$frame$var[1])
+split_vars <- unique(as.character(tree_model$frame$var[tree_model$frame$var != "<leaf>"]))
+```
+
+Hal krusial pada pemodelan klasifikasi ini adalah pengeluaran `Sale_Price` dari prediktor. Karena `Price_Class` diturunkan langsung dari `Sale_Price`, menyertakannya akan menimbulkan kebocoran target (*data leakage*) yang membuat akurasi nyaris sempurna namun tidak bermakna.
+
+Pohon memisahkan data pertama kali berdasarkan `r kode(root_var)` (sebelum atau sesudah 1985), lalu berdasarkan `Gr_Liv_Area` di kedua cabang; `Overall_Qual_num` hanya dipakai di satu cabang untuk rumah lama yang luas. Variabel yang dipakai sebagai pemisah adalah `r kode(split_vars)`. Tabel *variable importance* menunjukkan pola serupa: `r kode(imp_df$Variabel[1])` (`r imp_df$Importance[1]`) paling berpengaruh, diikuti `r kode(imp_df$Variabel[2])` (`r imp_df$Importance[2]`) dan `r kode(imp_df$Variabel[3])` (`r imp_df$Importance[3]`). Urutan ini berbeda dari peringkat korelasi karena pohon memilih pemisah yang paling menurunkan *impurity* untuk target biner, bukan korelasi linier dengan harga kontinu. Selain itu, `Year_Built` berkorelasi `r sprintf("%.2f", cor_mat["Year_Built", "Overall_Qual_num"])` dengan `Overall_Qual`, sehingga keduanya membawa sebagian informasi yang sama. Struktur pohon yang ringkas membuat aturan klasifikasi mudah dibaca oleh pengambil keputusan.
+
+### Prediksi, Confusion Matrix, dan Metrik Evaluasi
+
+```{r clf-eval}
+pred_clf <- predict(tree_model, newdata = test_clf, type = "class")
+conf_mat <- table(Prediksi = pred_clf, Aktual = test_clf$Price_Class)
+print(conf_mat)
+
+# Kelas positif: "High"
+TP <- conf_mat["High", "High"]
+FP <- conf_mat["High", "Low"]
+FN <- conf_mat["Low",  "High"]
+TN <- conf_mat["Low",  "Low"]
+
+accuracy  <- (TP + TN) / sum(conf_mat)
+precision <- TP / (TP + FP)
+recall    <- TP / (TP + FN)
+f1        <- 2 * precision * recall / (precision + recall)
+
+metrik_clf <- data.frame(
+  Metrik = c("Accuracy", "Precision", "Recall", "F1-Score"),
+  Nilai  = round(c(accuracy, precision, recall, f1), 4)
+)
+kable(metrik_clf, caption = "Metrik Evaluasi Klasifikasi pada Data Uji (kelas positif: High)")
+```
+
+```{r clf-error-median}
+# Apakah kesalahan klasifikasi berada di dekat ambang median?
+salah <- pred_clf != test_clf$Price_Class
+jarak_median <- abs(test$Sale_Price - median_price)
+med_jarak_salah <- median(jarak_median[salah])
+med_jarak_benar <- median(jarak_median[!salah])
+share_salah_30k <- mean(jarak_median[salah] <= 30000)
+
+kable(data.frame(
+  Kelompok = c("Salah klasifikasi", "Benar klasifikasi"),
+  n = c(sum(salah), sum(!salah)),
+  Median_Jarak_ke_Ambang_USD = format(c(med_jarak_salah, med_jarak_benar), big.mark = ",")
+), caption = "Jarak Harga Aktual ke Ambang Median (Data Uji)")
+```
+
+**Akurasi `r round(accuracy * 100, 1)` persen** menunjukkan proporsi prediksi benar secara keseluruhan, dan karena kedua kelas seimbang, akurasi merupakan metrik yang valid di sini. **Precision `r round(precision, 3)`** berarti dari seluruh rumah yang diprediksi *High*, sebagian besar memang berharga tinggi. **Recall `r round(recall, 3)`** lebih rendah: model melewatkan `r FN` rumah berharga tinggi dan memprediksinya sebagai *Low*, sementara hanya `r FP` rumah murah yang keliru diprediksi *High*. Artinya model cenderung konservatif dalam memberi label *High*. Keduanya terangkum dalam **F1-score `r round(f1, 3)`**.
+
+Kesalahan klasifikasi memang terkonsentrasi di dekat ambang. Median jarak harga aktual ke ambang USD `r format(median_price, big.mark=",")` hanya USD `r format(med_jarak_salah, big.mark=",")` untuk rumah yang salah diklasifikasi, dibanding USD `r format(med_jarak_benar, big.mark=",")` untuk rumah yang benar. Sebanyak `r round(share_salah_30k * 100)` persen kesalahan berada dalam rentang USD 30,000 dari ambang, yaitu zona yang memang paling ambigu.
+
+## Klastering (Clustering)
+
+Tujuan klastering adalah mengelompokkan rumah berdasarkan kemiripan karakteristik tanpa label. Algoritma yang digunakan adalah **K-Means**. Berbeda dari regresi dan klasifikasi, klastering tidak memiliki "jawaban benar", sehingga jumlah klaster (k) ditentukan dengan hati-hati dan kualitasnya dievaluasi dengan metrik internal sebelum hasilnya ditafsirkan.
+
+### Penentuan Jumlah Cluster (Elbow Method dan Silhouette Score)
+
+```{r clust-elbow}
+dist_mat <- dist(clust_scaled)
+
+# Elbow Method: total within-cluster sum of squares
+set.seed(123)
+wss <- sapply(1:10, function(k) {
+  kmeans(clust_scaled, centers = k, nstart = 25, iter.max = 50)$tot.withinss
+})
+
+# Silhouette rata-rata untuk setiap kandidat k
+sil_k <- sapply(2:8, function(k) {
+  set.seed(123)
+  km <- kmeans(clust_scaled, centers = k, nstart = 25, iter.max = 50)
+  mean(silhouette(km$cluster, dist_mat)[, 3])
+})
+
+elbow_df <- data.frame(k = 1:10, WSS = wss)
+sil_df   <- data.frame(k = 2:8, Silhouette = sil_k)
+
+ggplot(elbow_df, aes(x = k, y = WSS)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(size = 3, color = "darkred") +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Elbow Method", x = "Jumlah Cluster (k)",
+       y = "Total Within-Cluster SS")
+```
+
+```{r clust-silhouette-k}
+ggplot(sil_df, aes(x = k, y = Silhouette)) +
+  geom_line(color = "seagreen", linewidth = 1) +
+  geom_point(size = 3, color = "darkgreen") +
+  geom_point(data = sil_df[which.max(sil_df$Silhouette), ],
+             size = 5, shape = 1, color = "red", stroke = 1.2) +
+  scale_x_continuous(breaks = 2:8) +
+  labs(title = "Rata-rata Silhouette Score per Jumlah Cluster",
+       x = "Jumlah Cluster (k)", y = "Rata-rata Silhouette Score")
+```
+
+```{r clust-decision}
+k_opt <- sil_df$k[which.max(sil_df$Silhouette)]
+```
+
+Jumlah klaster ditentukan dari dua kriteria. Kurva **Elbow** menunjukkan penurunan WSS terbesar dari k=1 ke k=2 lalu melandai; pola ini umum dan karena itu bukan bukti kuat dengan sendirinya. **Silhouette Score** memberi dasar yang lebih tegas: nilainya tertinggi pada **k=`r k_opt`** (sekitar `r round(max(sil_df$Silhouette), 3)`) dan menurun ketika klaster ditambah. Karena itu dipilih k=`r k_opt`. Menambah klaster memang selalu menurunkan WSS, tetapi bila silhouette merosot, klaster tambahan cenderung saling tumpang tindih.
+
+### Penerapan K-Means dan Jumlah Anggota Cluster
+
+```{r clust-kmeans}
+set.seed(123)
+km_model <- kmeans(clust_scaled, centers = k_opt, nstart = 25, iter.max = 50)
+cat("Jumlah anggota tiap cluster:\n")
+print(table(Cluster = km_model$cluster))
+
+# Satu peta warna agar nomor cluster konsisten di seluruh grafik; mengikuti nilai k
+cluster_colors <- setNames(scales::hue_pal()(k_opt), as.character(seq_len(k_opt)))
+```
+
+Penerapan K-Means dengan k=`r k_opt` menghasilkan klaster tanpa klaster mikro yang janggal. Parameter `nstart = 25` menjalankan algoritma dari 25 inisialisasi acak dan memilih solusi terbaik, sehingga mengurangi risiko terperangkap pada optimum lokal.
+
+### Evaluasi Internal Cluster
+
+```{r clust-metrics}
+wcss <- km_model$tot.withinss   # Total Within-Cluster SS
+bss  <- km_model$betweenss      # Between-Cluster SS
+tss  <- km_model$totss          # Total SS
+ratio_bss <- bss / tss          # Rasio Between SS / Total SS
+
+sil     <- silhouette(km_model$cluster, dist_mat)
+avg_sil <- mean(sil[, 3])
+sil_per_cluster <- tapply(sil[, 3], sil[, 1], mean)
+
+eval_clust <- data.frame(
+  Metrik = c("Total Within-Cluster SS (WCSS)",
+             "Between-Cluster SS (BSS)",
+             "Total SS (TSS)",
+             "Rasio BSS / TSS",
+             "Rata-rata Silhouette Score"),
+  Nilai  = c(format(round(wcss, 1), nsmall = 1), format(round(bss, 1), nsmall = 1),
+             format(round(tss, 1), nsmall = 1),
+             format(round(ratio_bss, 4), nsmall = 4), format(round(avg_sil, 4), nsmall = 4))
+)
+kable(eval_clust, caption = paste0("Metrik Evaluasi Internal Cluster (k = ", k_opt, ")"))
+```
+
+```{r clust-silplot, fig.cap="Plot Silhouette untuk Solusi K-Means Terpilih"}
+par(family = "serif")
+plot(sil, col = cluster_colors, border = NA,
+     main = paste0("Silhouette Plot (k = ", k_opt, ")"))
+```
+
+Evaluasi internal dilakukan sebelum profiling agar segmen hanya ditafsirkan bila solusinya layak. Rasio **BSS/TSS `r round(ratio_bss, 3)`** berarti sekitar `r round(ratio_bss * 100, 1)` persen total keragaman dijelaskan oleh pemisahan antar klaster. **Rata-rata Silhouette Score `r round(avg_sil, 3)`** tergolong sedang, dan nilainya tidak merata antar klaster (`r paste0("cluster ", names(sil_per_cluster), ": ", round(sil_per_cluster, 2), collapse = "; ")`). Nilai sedang ini mencerminkan sifat data properti yang kontinu: harga, ukuran, dan kualitas bergerak dalam spektrum yang mulus, sehingga sebagian rumah berada di zona transisi antar segmen.
+
+### Visualisasi Cluster dengan PCA
+
+```{r clust-pca}
+pca <- prcomp(clust_scaled)
+var_exp <- summary(pca)$importance[2, 1:2]
+pca_df <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2],
+                     Cluster = factor(km_model$cluster))
+
+# Convex hull tiap cluster (area berwarna) dan centroid tiap cluster
+hulls <- pca_df %>% group_by(Cluster) %>% slice(chull(PC1, PC2)) %>% ungroup()
+centroids <- pca_df %>% group_by(Cluster) %>%
+  summarise(PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop")
+
+p_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster, fill = Cluster)) +
+  geom_polygon(data = hulls, alpha = 0.2, linewidth = 0.4) +
+  geom_point(aes(shape = Cluster), size = 1.8, alpha = 0.85) +
+  geom_point(data = centroids, aes(x = PC1, y = PC2), shape = 3,
+             size = 4, stroke = 1.1, color = "black", inherit.aes = FALSE) +
+  scale_color_manual(values = cluster_colors) +
+  scale_fill_manual(values = cluster_colors) +
+  labs(title = "Visualisasi Cluster K-Means",
+       subtitle = "Reduksi dimensi menggunakan PCA (tanda + menandai centroid)",
+       x = paste0("Dim1 (", round(var_exp[1] * 100, 1), "%)"),
+       y = paste0("Dim2 (", round(var_exp[2] * 100, 1), "%)"))
+p_pca
+```
+
+*Principal Component Analysis* (PCA) dipakai untuk memvisualisasikan klaster pada bidang dua dimensi. Dua komponen pertama menjelaskan **`r round(sum(var_exp) * 100, 1)` persen** total variasi, dengan PC1 sendiri menjelaskan `r round(var_exp[1] * 100, 1)` persen dan merepresentasikan gabungan harga, ukuran, dan kualitas. Karena PC1 begitu dominan, data efektif hampir satu dimensi, dan kedua klaster terutama terpisah di sepanjang sumbu Dim1. Tanda **+** menunjukkan *centroid* tiap klaster. Area pertemuan di tengah serta sebaran titik di sekitar centroid konsisten dengan skor silhouette yang tergolong sedang: klaster terpisah jelas di kedua ujung, tetapi batas di antaranya tidak tegas.
+
+### Profiling dan Pelabelan Cluster
+
+```{r clust-profile}
+# Pelabelan berbasis urutan rata-rata harga: klaster termahal = Premium.
+cl_price <- tapply(clust_vars$Sale_Price, km_model$cluster, mean)
+urutan   <- rank(cl_price, ties.method = "first")
+label_text <- if (k_opt == 2) {
+  c("Properti Standar/Menengah", "Properti Premium")
+} else {
+  paste0("Segmen harga ke-", seq_len(k_opt))
+}
+label_map <- setNames(label_text[urutan], names(cl_price))
+stopifnot(!anyNA(label_map))
+
+profil <- clust_vars %>%
+  mutate(Cluster = km_model$cluster) %>%
+  group_by(Cluster) %>%
+  summarise(
+    Jumlah        = n(),
+    Rata_Harga    = round(mean(Sale_Price)),
+    Rata_Luas     = round(mean(Gr_Liv_Area)),
+    Rata_Kualitas = round(mean(Overall_Qual_num), 1)
+  ) %>%
+  mutate(Label = label_map[as.character(Cluster)]) %>%
+  arrange(Rata_Harga)
+
+kable(profil, caption = "Profil dan Label Tiap Cluster")
+```
+
+```{r clust-vs-class}
+# Seberapa mirip segmen K-Means dengan label High/Low dari median harga?
+ct <- table(Cluster = label_map[as.character(km_model$cluster)],
+            Kelas_Harga = model_df$Price_Class)
+print(ct)
+kesesuaian <- if (k_opt == 2) {
+  (ct["Properti Premium", "High"] + ct["Properti Standar/Menengah", "Low"]) / sum(ct)
+} else {
+  NA
+}
+```
+
+Setelah solusi dinyatakan layak, setiap klaster diberi label berdasarkan karakteristik rata-ratanya: klaster dengan rata-rata harga, luas, dan kualitas tertinggi diberi label **"Properti Premium"**, sedangkan klaster lainnya, yang mencakup mayoritas rumah, diberi label **"Properti Standar/Menengah"**. Ketiga variabel bergerak searah, sehingga segmen premium adalah rumah yang lebih besar, lebih berkualitas, dan lebih mahal.
+
+Tabulasi silang dengan label `Price_Class` menunjukkan kedua pembagian sesuai untuk `r round(kesesuaian * 100, 1)` persen rumah. Dari `r sum(ct["Properti Premium", ])` rumah di segmen Premium, `r ct["Properti Premium", "High"]` termasuk kelas *High*, sedangkan segmen Standar/Menengah memuat `r ct["Properti Standar/Menengah", "High"]` rumah kelas *High* dan `r ct["Properti Standar/Menengah", "Low"]` rumah kelas *Low*. Artinya, karena `Sale_Price` ikut menjadi fitur dan data efektif hampir satu dimensi, segmentasi ini sebagian besar mencerminkan tingkat harga. Nilai tambahnya terutama sebagai profil deskriptif kedua segmen (rata-rata luas dan kualitas), bukan sebagai penemuan kelompok baru yang tidak tertangkap oleh klasifikasi.
+
+# Evaluation
+
+## Evaluasi Hasil Regresi
+
+Model regresi linier menjelaskan sekitar `r round(r2 * 100)` persen variasi harga pada data uji ($R^2$ `r round(r2, 3)`) dan menurunkan RMSE sekitar `r round((1 - rmse / baseline_rmse) * 100)` persen dibanding baseline rata-rata. MAE USD `r format(round(mae), big.mark=",")` memberi gambaran galat tipikal dalam satuan yang mudah dipahami. Galat absolut terbesar terjadi pada rumah termahal, sedangkan galat relatif terbesar terjadi pada rumah termurah. Model ini layak sebagai alat estimasi awal harga, dengan catatan bahwa prediksi untuk rumah yang sangat luas atau dengan kondisi penjualan tidak normal perlu disikapi hati-hati.
+
+## Evaluasi Hasil Klasifikasi
+
+Pohon keputusan mencapai akurasi `r round(accuracy * 100, 1)` persen, dengan precision `r round(precision, 3)`, recall `r round(recall, 3)`, dan F1-score `r round(f1, 3)` untuk kelas harga tinggi. Precision yang lebih tinggi dari recall menunjukkan model lebih sering melewatkan rumah mahal daripada salah melabeli rumah murah sebagai mahal. Kesalahan terkonsentrasi di dekat ambang median, sehingga merupakan konsekuensi wajar dari batas kelas yang tegas. Keunggulan utama model ini adalah interpretabilitasnya: aturan keputusan dapat dibaca langsung dari struktur pohon.
+
+## Evaluasi Hasil Klastering
+
+Jumlah klaster dipilih berdasarkan puncak Silhouette Score pada k=`r k_opt`, didukung bentuk kurva Elbow. Solusi akhir memiliki rasio BSS/TSS `r round(ratio_bss, 3)` dan rata-rata Silhouette Score `r round(avg_sil, 3)`. Skor silhouette yang tergolong sedang, PC1 yang mendominasi variasi, dan kesesuaian `r round(kesesuaian * 100, 1)` persen dengan label `Price_Class` menunjukkan bahwa segmentasi ini sebaiknya dibaca sebagai pembagian indikatif berbasis tingkat harga, bukan kelompok alami yang terpisah tegas.
+
+## Perbandingan dengan Tujuan Bisnis
+
+Tujuan pertama (prediksi harga) terpenuhi untuk estimasi awal: model jauh lebih baik dari baseline, namun galatnya masih sekitar `r round(mae / median_price * 100)` persen median harga. Tujuan kedua (penggolongan harga) terpenuhi oleh pohon keputusan yang akurat dan mudah ditafsirkan. Tujuan ketiga (segmentasi pasar) terpenuhi sebagian: dua segmen yang dihasilkan jelas berbeda dalam harga, luas, dan kualitas, tetapi sebagian besar menduplikasi pembagian harga yang sudah ada.
+
+## Insight yang Diperoleh
+
+Kualitas bangunan (`Overall_Qual`) dan luas ruang hidup (`Gr_Liv_Area`) konsisten muncul sebagai faktor kuat: keduanya berkorelasi paling tinggi dengan harga dan menjadi prediktor positif yang signifikan pada regresi. Pohon keputusan memberi sudut pandang yang sedikit berbeda: `Year_Built` menjadi pemisah pertama dan variabel paling penting, disusul `Overall_Qual`. Hal ini menunjukkan bahwa usia bangunan, yang berkorelasi dengan kualitas, sangat informatif untuk membedakan rumah di atas dan di bawah median harga. Perbedaan antarmetode ini justru memperkaya interpretasi: kesimpulan tentang "faktor terpenting" bergantung pada metode dan tujuan yang dipakai.
+
+## Keterbatasan
+
+- Seleksi prediktor (sepuluh korelasi tertinggi) dan ambang median dihitung dari seluruh data sebelum pembagian train-test, sehingga data uji ikut memengaruhi keputusan pemodelan secara tidak langsung.
+- Evaluasi hanya memakai satu pembagian train-test tanpa *cross-validation*, sehingga variansi metrik belum diketahui.
+- Hanya variabel numerik yang dipakai; variabel kategorik seperti `Neighborhood` (lokasi) belum dimasukkan.
+- Regresi memakai harga tanpa transformasi meskipun distribusinya menceng, dan rumah dengan luas di atas 4,000 sq ft tidak ditangani secara khusus.
+- Klastering memakai `Sale_Price` sebagai fitur, sehingga segmen sebagian besar mencerminkan tingkat harga.
+- `make_ames()` mengodekan sebagian nilai hilang sebagai 0 (termasuk `r na_raw_mv` nilai `Mas_Vnr_Area`).
+- Seluruh temuan bersifat asosiatif, bukan kausal.
+
+# Kesimpulan
+
+## Faktor yang Paling Berasosiasi dengan Harga Rumah
+
+Faktor yang paling kuat berasosiasi dengan harga rumah pada dataset Ames Housing adalah **kualitas bangunan keseluruhan (`Overall_Qual`)** dan **luas ruang hidup (`Gr_Liv_Area`)**, diikuti variabel ukuran lain seperti kapasitas garasi dan luas basement. Untuk membedakan rumah di atas dan di bawah median harga, **tahun pembangunan (`Year_Built`)** juga sangat informatif.
+
+## Kemampuan Model Memprediksi Harga
+
+Model regresi linier menjelaskan sekitar `r round(r2 * 100)` persen variasi harga pada data uji dengan MAE USD `r format(round(mae), big.mark=",")`. Galat absolut terbesar terjadi pada properti termahal, sehingga prediksi pada segmen tersebut perlu disikapi hati-hati.
+
+## Hasil Klasifikasi Rumah
+
+Pohon keputusan mengklasifikasikan rumah ke dalam kategori harga tinggi dan rendah dengan akurasi `r round(accuracy * 100, 1)` persen, precision `r round(precision, 3)`, recall `r round(recall, 3)`, dan F1-score `r round(f1, 3)`. Model ini transparan dan dapat dipakai untuk skrining cepat, dengan catatan bahwa rumah di sekitar median harga paling sering salah diklasifikasi.
+
+## Segmentasi Rumah Berdasarkan Cluster
+
+K-Means menghasilkan dua segmen: **Properti Premium** (harga, luas, dan kualitas tinggi) dan **Properti Standar/Menengah** yang mencakup mayoritas rumah. Karena segmen ini sebagian besar mengikuti tingkat harga, penggunaannya paling tepat sebagai profil deskriptif untuk komunikasi pemasaran.
+
+## Rekomendasi
+
+Pertama, saat menilai properti, kualitas bangunan dan luas ruang hidup sebaiknya menjadi pertimbangan utama karena keduanya paling kuat berasosiasi dengan harga; dengan variabel lain tetap, satu tingkat kualitas berasosiasi dengan selisih harga sekitar USD `r format(round(coef(lm_model)["Overall_Qual_num"], -2), big.mark=",")`. Angka ini merupakan asosiasi, bukan jaminan kenaikan harga bila kualitas ditingkatkan. Kedua, strategi pemasaran dapat dibedakan untuk segmen premium dan standar/menengah. Ketiga, pohon keputusan dapat dipakai sebagai alat skrining awal bagi agen properti, dengan perhatian khusus pada listing yang harganya mendekati median.
+
+# Lampiran: Informasi Sesi R
+
+```{r session-info, echo=FALSE}
+print(sessionInfo(), locale = FALSE)
+```
+
+```{r export-figures, include=FALSE}
+# Menyimpan grafik terpilih ke folder figures/ untuk README.
+# Path relatif terhadap folder analysis/ (lokasi file Rmd saat di-knit).
+fig_dir <- file.path("..", "figures")
+dir.create(fig_dir, showWarnings = FALSE)
+
+ggsave(file.path(fig_dir, "price_by_quality.png"), p_quality,
+       width = 8, height = 5, dpi = 150, bg = "white")
+ggsave(file.path(fig_dir, "living_area_vs_price.png"), p_area,
+       width = 8, height = 5, dpi = 150, bg = "white")
+ggsave(file.path(fig_dir, "kmeans_pca_clusters.png"), p_pca,
+       width = 8, height = 5, dpi = 150, bg = "white")
+
+png(file.path(fig_dir, "decision_tree.png"), width = 8, height = 5, units = "in", res = 150)
+par(family = "serif")
+rpart.plot(tree_model, type = 2, extra = 104,
+           box.palette = "GnBu", fallen.leaves = TRUE,
+           main = "Pohon Keputusan Klasifikasi Kelas Harga")
+invisible(dev.off())
+```

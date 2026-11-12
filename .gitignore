@@ -1,0 +1,33 @@
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Local environment and secrets
+.Renviron
+.env
+
+# knitr / R Markdown intermediates
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# Outputs from the RStudio "Knit" button land next to the Rmd.
+# Rendered reports belong in reports/ (use render.R).
+analysis/*.html
+analysis/*.pdf
+
+# LaTeX intermediates
+*.aux
+*.log
+*.out
+*.toc
+*.tex
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# renv keeps its own renv/.gitignore for renv/library, renv/staging, etc.
